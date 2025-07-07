@@ -144,7 +144,7 @@ check_docker_logs() {
 }
 
 check_syslog_errors() {
-    errors=$(journalctl --since "5 minutes ago" | grep -Ei "error|fail|critical" | grep -v "Failed password")
+    errors=$(journalctl --since "15 minutes ago" | grep -Ei "error|fail|critical" | grep -v "Failed password")
     if [[ -n "$errors" ]]; then
         last_errors=$(echo "$errors" | tail -n 5)
         formatted_errors=$(echo "$last_errors" | sed 's/^/  /')
