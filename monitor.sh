@@ -4,19 +4,19 @@ export LC_NUMERIC=C
 
 
 # Конфигурация
-bot_token=""
-chat_id=""
+bot_token="6501870789:AAHKgRk9Pse5yivyRsU3y1mthIwpn80Kfkc"
+chat_id="459663220"
 server_name="$(hostname -I | awk '{print $1}')"
 
 disks=("/" "/home")
-services=("docker" "ssh")
+services=("docker" "ssh" "nexus-node")
 
 # Пороги
 load_threshold_fraction=0.9
 disk_warn=80
 disk_crit=90
-mem_warn=80
-mem_crit=90
+mem_warn=90
+mem_crit=95
 
 # Лог
 log_file="/var/log/server-monitor.log"
@@ -84,6 +84,28 @@ check_memory() {
     fi
 }
 
+check_swap() {
+    swap_info=$(free -m | awk '/^Swap:/ {print $2, $3}')
+    total_swap=$(echo "$swap_info" | awk '{print $1}')
+    used_swap=$(echo "$swap_info" | awk '{print $2}')
+
+    # Если swap не настроен (0), пропускаем
+    if (( total_swap == 0 )); then
+        log "Swap not configured, skipping check."
+        return
+    fi
+
+    usage_percent=$(( used_swap * 100 / total_swap ))
+
+    if (( usage_percent >= 70 )); then
+        send_telegram_message "🚨 *CRITICAL:* Swap usage is ${usage_percent}% (${used_swap}MB of ${total_swap}MB)"
+        log "Critical swap usage: ${usage_percent}%"
+    elif (( usage_percent >= 50 )); then
+        send_telegram_message "⚠️ *WARNING:* Swap usage is ${usage_percent}% (${used_swap}MB of ${total_swap}MB)"
+        log "Warning swap usage: ${usage_percent}%"
+    fi
+}
+
 check_services() {
     for svc in "${services[@]}"; do
         if ! systemctl is-active --quiet "$svc"; then
@@ -102,12 +124,46 @@ check_ssh_logins() {
     fi
 }
 
+check_docker_logs() {
+    if ! command -v docker &> /dev/null; then
+        log "Docker not installed, skipping docker log check."
+        return
+    fi
+
+    containers=$(docker ps -q)
+    for container in $containers; do
+        name=$(docker inspect --format='{{.Name}}' "$container" | sed 's/\///')
+        logs=$(docker logs --since 5m "$container" 2>&1 | grep -iE "error|fail|panic|segfault" | tail -n 5)
+
+        if [[ -n "$logs" ]]; then
+            formatted_logs=$(echo "$logs" | sed 's/^/  /')
+            send_telegram_message "🐳 *Docker error in container \`$name\`:*\n\`\`\`\n$formatted_logs\n\`\`\`"
+            log "Docker error in container $name"
+        fi
+    done
+}
+
+check_syslog_errors() {
+    errors=$(journalctl --since "5 minutes ago" | grep -Ei "error|fail|critical" | grep -v "Failed password")
+    if [[ -n "$errors" ]]; then
+        last_errors=$(echo "$errors" | tail -n 5)
+        formatted_errors=$(echo "$last_errors" | sed 's/^/  /')
+        send_telegram_message "❗ *System errors detected:*\n\`\`\`\n$formated_errors\n\`\`\`"
+        log "System errors found in logs"
+    fi
+}
+
+trap "echo '🛑 Script stopped' >> $log_file; exit" SIGINT SIGTERM
+
 # Основной цикл
 while true; do
     check_disks
     check_load
     check_memory
+    check_swap
+    check_docker_logs
     check_services
     check_ssh_logins
+    check_syslog_errors
     sleep 300
 done
