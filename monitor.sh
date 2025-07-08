@@ -2,10 +2,9 @@
 
 export LC_NUMERIC=C
 
-
 # Конфигурация
-bot_token="6501870789:AAHKgRk9Pse5yivyRsU3y1mthIwpn80Kfkc"
-chat_id="459663220"
+bot_token="PASTE_YOUR_BOT_TOKEN_HERE"
+chat_id="PASTE_YOUR_CHAT_ID_HERE"
 server_name="$(hostname -I | awk '{print $1}')"
 
 disks=("/" "/home")
@@ -17,10 +16,12 @@ disk_warn=80
 disk_crit=90
 mem_warn=90
 mem_crit=95
+swap_warn=50
+swap_crit=70
 
 # Лог
 log_file="/var/log/server-monitor.log"
-max_log_size=500000 # 500 КБ
+max_log_size=500000 # 500 KB
 
 send_telegram_message() {
     local message="$1"
@@ -89,7 +90,6 @@ check_swap() {
     total_swap=$(echo "$swap_info" | awk '{print $1}')
     used_swap=$(echo "$swap_info" | awk '{print $2}')
 
-    # Если swap не настроен (0), пропускаем
     if (( total_swap == 0 )); then
         log "Swap not configured, skipping check."
         return
@@ -97,10 +97,10 @@ check_swap() {
 
     usage_percent=$(( used_swap * 100 / total_swap ))
 
-    if (( usage_percent >= 70 )); then
+    if (( usage_percent >= swap_crit )); then
         send_telegram_message "🚨 *CRITICAL:* Swap usage is ${usage_percent}% (${used_swap}MB of ${total_swap}MB)"
         log "Critical swap usage: ${usage_percent}%"
-    elif (( usage_percent >= 50 )); then
+    elif (( usage_percent >= swap_warn )); then
         send_telegram_message "⚠️ *WARNING:* Swap usage is ${usage_percent}% (${used_swap}MB of ${total_swap}MB)"
         log "Warning swap usage: ${usage_percent}%"
     fi
@@ -118,9 +118,19 @@ check_services() {
 check_ssh_logins() {
     logins=$(journalctl -u sshd --since "5 minutes ago" | grep "Accepted password\|Accepted publickey")
     if [[ -n "$logins" ]]; then
-        msg="🔐 *New SSH login(s):*\n$(echo "$logins" | tail -n 3)"
+        msg="🔐 *New SSH login(s):*\n\`\`\`\n$(echo "$logins" | tail -n 3 | sed 's/^/  /')\n\`\`\`"
         send_telegram_message "$msg"
         log "SSH logins detected."
+    fi
+}
+
+check_syslog_errors() {
+    errors=$(journalctl --since "5 minutes ago" | grep -Ei "error|fail|critical" | grep -v "Failed password")
+    if [[ -n "$errors" ]]; then
+        last_errors=$(echo "$errors" | tail -n 5)
+        formatted_errors=$(echo "$last_errors" | sed 's/^/  /')
+        send_telegram_message "❗ *System errors detected:*\n\`\`\`\n$formatted_errors\n\`\`\`"
+        log "System errors found in logs"
     fi
 }
 
@@ -143,16 +153,6 @@ check_docker_logs() {
     done
 }
 
-check_syslog_errors() {
-    errors=$(journalctl --since "15 minutes ago" | grep -Ei "error|fail|critical" | grep -v "Failed password")
-    if [[ -n "$errors" ]]; then
-        last_errors=$(echo "$errors" | tail -n 5)
-        formatted_errors=$(echo "$last_errors" | sed 's/^/  /')
-        send_telegram_message "❗ *System errors detected:*\n\`\`\`\n$formated_errors\n\`\`\`"
-        log "System errors found in logs"
-    fi
-}
-
 trap "echo '🛑 Script stopped' >> $log_file; exit" SIGINT SIGTERM
 
 # Основной цикл
@@ -161,9 +161,9 @@ while true; do
     check_load
     check_memory
     check_swap
-    check_docker_logs
     check_services
     check_ssh_logins
     check_syslog_errors
+    check_docker_logs
     sleep 300
 done
