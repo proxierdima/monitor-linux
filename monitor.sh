@@ -3,8 +3,8 @@
 export LC_NUMERIC=C
 
 # Конфигурация
-bot_token="PASTE_YOUR_BOT_TOKEN_HERE"
-chat_id="PASTE_YOUR_CHAT_ID_HERE"
+bot_token="${BOT_TOKEN:-PASTE_YOUR_BOT_TOKEN_HERE}"
+chat_id="${CHAT_ID:-PASTE_YOUR_CHAT_ID_HERE}"
 server_name="$(hostname -I | awk '{print $1}')"
 
 disks=("/" "/home")
@@ -22,12 +22,26 @@ swap_crit=70
 # Лог
 log_file="/var/log/server-monitor.log"
 max_log_size=500000 # 500 KB
+max_telegram_lines=10
+
+# ===== Функции =====
+
+escape_markdown() {
+    # Экранирует спецсимволы для Markdown
+    sed -e 's/\`/\\`/g' -e 's/_/\\_/g' -e 's/\*/\\*/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g'
+}
+
+format_logs_for_telegram() {
+    local input="$1"
+    local trimmed=$(echo "$input" | tail -n "$max_telegram_lines")
+    echo -e "\`\`\`\n$trimmed\n\`\`\`"
+}
 
 send_telegram_message() {
     local message="$1"
     curl -s -X POST "https://api.telegram.org/bot$bot_token/sendMessage" \
          -d "chat_id=$chat_id" \
-         -d "text=*[$server_name]* $message" \
+         -d "text=*[$server_name]* $(echo "$message" | escape_markdown)" \
          -d "parse_mode=Markdown"
 }
 
@@ -118,7 +132,7 @@ check_services() {
 check_ssh_logins() {
     logins=$(journalctl -u sshd --since "5 minutes ago" | grep "Accepted password\|Accepted publickey")
     if [[ -n "$logins" ]]; then
-        msg="🔐 *New SSH login(s):*\n\`\`\`\n$(echo "$logins" | tail -n 3 | sed 's/^/  /')\n\`\`\`"
+        msg="🔐 *New SSH login(s):*\n$(format_logs_for_telegram "$logins")"
         send_telegram_message "$msg"
         log "SSH logins detected."
     fi
@@ -127,9 +141,9 @@ check_ssh_logins() {
 check_syslog_errors() {
     errors=$(journalctl --since "5 minutes ago" | grep -Ei "error|fail|critical" | grep -v "Failed password")
     if [[ -n "$errors" ]]; then
-        last_errors=$(echo "$errors" | tail -n 5)
-        formatted_errors=$(echo "$last_errors" | sed 's/^/  /')
-        send_telegram_message "❗ *System errors detected:*\n\`\`\`\n$formatted_errors\n\`\`\`"
+        last_errors=$(echo "$errors" | sed 's/\x1b\[[0-9;]*m//g' | tail -n 5)
+        formatted_errors=$(format_logs_for_telegram "$last_errors")
+        send_telegram_message "❗ *System errors detected:*\n$formatted_errors"
         log "System errors found in logs"
     fi
 }
@@ -143,19 +157,23 @@ check_docker_logs() {
     containers=$(docker ps -q)
     for container in $containers; do
         name=$(docker inspect --format='{{.Name}}' "$container" | sed 's/\///')
-        logs=$(docker logs --since 5m "$container" 2>&1 | grep -iE "error|fail|panic|segfault" | tail -n 5)
+        logs=$(docker logs --since 5m "$container" 2>&1 |
+            grep -iE "error|fail|panic|segfault" |
+            sed 's/\x1b\[[0-9;]*m//g' |
+            tail -n "$max_telegram_lines")
 
         if [[ -n "$logs" ]]; then
-            formatted_logs=$(echo "$logs" | sed 's/^/  /')
-            send_telegram_message "🐳 *Docker error in container \`$name\`:*\n\`\`\`\n$formatted_logs\n\`\`\`"
+            formatted_logs=$(format_logs_for_telegram "$logs")
+            send_telegram_message "🐳 *Docker error in container \`$name\`:*\n$formatted_logs"
             log "Docker error in container $name"
         fi
     done
 }
 
+# Обработка завершения
 trap "echo '🛑 Script stopped' >> $log_file; exit" SIGINT SIGTERM
 
-# Основной цикл
+# ======= Основной цикл =======
 while true; do
     check_disks
     check_load
